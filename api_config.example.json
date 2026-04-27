@@ -1,0 +1,37 @@
+{
+    "default_provider": "siliconflow",
+
+    "providers": {
+        "siliconflow": {
+            "api_key": "sk-your-key-here",
+            "api_url": "https://api.siliconflow.cn/v1/chat/completions",
+            "models": {
+                "vl": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+                "talk": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+                "experiment": "Pro/MiniMaxAI/MiniMax-M2.5"
+            }
+        },
+
+        "anthropic": {
+            "api_key": "",
+            "api_url": "https://api.anthropic.com/v1/messages",
+            "models": {
+                "claude": "claude-sonnet-4-6",
+                "haiku": "claude-haiku-4-5-20251001"
+            }
+        },
+
+        "openai": {
+            "api_key": "",
+            "api_url": "https://api.openai.com/v1/chat/completions",
+            "models": {
+                "gpt4o": "gpt-4o"
+            }
+        },
+
+        "sd_webui": {
+            "api_url": "http://127.0.0.1:7860",
+            "models": {}
+        }
+    }
+}
