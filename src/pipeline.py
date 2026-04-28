@@ -20,21 +20,25 @@ from src.config import api_config, settings
 logger = logging.getLogger(__name__)
 
 # Prompt sent to the LLM for compound extraction
-_EXTRACT_PROMPT = """Extract all organic chemistry compound names from the user's description below.
+_EXTRACT_PROMPT = """Extract all organic chemistry compounds from the user's description below.
 Return a JSON object with this exact structure (no other text):
 
 {{
-  "title": "a short title for the mindmap",
+  "title": "short mindmap title (in English)",
   "compounds": [
     {{
-      "name": "compound name (English preferred, e.g. phenol not benzene)",
-      "parent": "parent compound name or null for top-level"
+      "name": "IUPAC name in English (e.g. phenol, ethanol, benzoic acid)",
+      "smiles": "canonical SMILES string for this compound",
+      "parent": "parent compound English name or null for top-level"
     }}
   ]
 }}
 
-If the user mentions a reaction, include both reactants and products.
-If the user mentions a compound class (e.g. "alcohols"), expand to 2-3 representative examples.
+CRITICAL RULES:
+- ALL compound names MUST be in English (IUPAC). Never use Chinese names.
+- Provide the canonical SMILES string for every compound.
+- If the user mentions a reaction, include both reactants and products.
+- If the user mentions a compound class (e.g. "alcohols"), expand to 2-3 representative examples.
 
 User description:
 {user_input}
@@ -51,10 +55,12 @@ class ChemicalImagePipeline:
         print(result["final_image"])
     """
 
-    def __init__(self, output_dir: Optional[Path] = None, api_key: Optional[str] = None):
+    def __init__(self, output_dir: Optional[Path] = None, api_key: Optional[str] = None,
+                 image_provider: str = "packyapi"):
         self.output_dir = output_dir or settings.OUTPUT_DIR
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._api_key = api_key or api_config.key
+        self._image_provider = image_provider
 
     # ── public API ──────────────────────────────────────────────
 
@@ -101,8 +107,8 @@ class ChemicalImagePipeline:
         logger.info("Step 1 — LLM parsed %d compounds: %s", len(compounds),
                     [c["name"] for c in compounds])
 
-        # Step 2: Resolve each compound to SMILES
-        resolved = self._resolve_compounds([c["name"] for c in compounds])
+        # Step 2: Resolve each compound to SMILES (use LLM-provided SMILES when available)
+        resolved = self._resolve_compounds(compounds)
         steps.append("resolve")
         logger.info("Step 2 — resolved %d compounds", len(resolved))
 
@@ -229,12 +235,27 @@ class ChemicalImagePipeline:
 
     # ── step 2: resolve compounds ───────────────────────────────
 
-    def _resolve_compounds(self, names: list[str]) -> list[dict]:
+    def _resolve_compounds(self, compounds: list[dict]) -> list[dict]:
+        """Resolve compounds to SMILES. Uses LLM-provided SMILES when available."""
+        from rdkit import Chem
         from src.structure_gen.generator import StructureGenerator
 
         gen = StructureGenerator()
         results = []
-        for name in names:
+        for c in compounds:
+            name = c.get("name", str(c)) if isinstance(c, dict) else str(c)
+            llm_smiles = c.get("smiles", "") if isinstance(c, dict) else ""
+
+            # If LLM provided a valid SMILES, use it directly (validate via RDKit)
+            if llm_smiles:
+                mol = Chem.MolFromSmiles(llm_smiles)
+                if mol is not None:
+                    canonical = Chem.MolToSmiles(mol)
+                    results.append({"name": name, "smiles": canonical, "status": "ok"})
+                    continue
+                logger.warning("LLM SMILES invalid for '%s': %s — falling back to PubChem", name, llm_smiles)
+
+            # Fall back to PubChem resolution
             try:
                 smiles = gen.resolve(name)
                 results.append({"name": name, "smiles": smiles, "status": "ok"})
@@ -262,8 +283,8 @@ class ChemicalImagePipeline:
                     r["smiles"],
                     style="ACS_1996",
                     output_path=struct_dir / f"{_safe_name(r['name'])}.png",
-                    width=600,
-                    height=400,
+                    width=800,
+                    height=533,
                 )
                 results.append({**r, "struct_path": str(path), "status": "ok"})
             except Exception as e:
@@ -309,7 +330,7 @@ class ChemicalImagePipeline:
     def _generate_scene(self, prompt: str, style: str, width: int, height: int) -> str:
         from src.scene_gen.generator import SceneGenerator
 
-        gen = SceneGenerator(provider="mock")
+        gen = SceneGenerator(provider=self._image_provider)
         img = gen.generate(prompt=prompt, width=width, height=height)
 
         scene_dir = self.output_dir / "scenes"
@@ -353,7 +374,7 @@ class ChemicalImagePipeline:
             overlay_rs = resize_with_alpha(overlay, struct_w, struct_h)
             bg = match_and_blend(
                 bg, overlay_rs, (x, y),
-                color_match=True, texture_blend=0.06, shadow=True, feather=2,
+                color_match=False, texture_blend=0, shadow=True, feather=0,
             )
 
         final_dir = self.output_dir / "final"
@@ -377,133 +398,6 @@ def _parse_llm_json(text: str) -> Optional[dict]:
         except json.JSONDecodeError:
             pass
     return None
-
-
-def _safe_name(name: str) -> str:
-    return re.sub(r'[^a-zA-Z0-9_一-鿿]', '_', name)[:40]
-
-    # ── step 2: resolve compounds ───────────────────────────────
-
-    def _resolve_compounds(self, names: list[str]) -> list[dict]:
-        from src.structure_gen.generator import StructureGenerator
-
-        gen = StructureGenerator()
-        results = []
-        for name in names:
-            try:
-                smiles = gen.resolve(name)
-                results.append({"name": name, "smiles": smiles, "status": "ok"})
-            except Exception as e:
-                logger.warning("resolve failed for '%s': %s", name, e)
-                results.append({"name": name, "smiles": "", "status": "error", "error": str(e)})
-        return results
-
-    # ── step 3: structure images ────────────────────────────────
-
-    def _generate_structures(self, resolved: list[dict], style: str) -> list[dict]:
-        from src.structure_gen.generator import StructureGenerator
-
-        gen = StructureGenerator()
-        results = []
-        struct_dir = self.output_dir / "structures"
-        struct_dir.mkdir(parents=True, exist_ok=True)
-
-        for r in resolved:
-            if r["status"] != "ok" or not r["smiles"]:
-                results.append({**r, "struct_path": "", "status": "skip"})
-                continue
-            try:
-                path, _ = gen.generate_from_smiles(
-                    r["smiles"],
-                    style="ACS_1996",
-                    output_path=struct_dir / f"{_safe_name(r['name'])}.png",
-                    width=600,
-                    height=400,
-                )
-                results.append({**r, "struct_path": str(path), "status": "ok"})
-            except Exception as e:
-                logger.warning("structure gen failed for '%s': %s", r["name"], e)
-                results.append({**r, "struct_path": "", "status": "error", "error": str(e)})
-        return results
-
-    # ── step 4: mindmap ─────────────────────────────────────────
-
-    def _build_mindmap(self, compounds: list[str], resolved: list[dict]) -> str:
-        from src.mindmap.layout import MindMapLayout, Node
-
-        # Build a simple 2-level tree: root -> compounds
-        root = Node(id="root", label="Organic Compounds")
-        for r in resolved:
-            if r["status"] == "ok":
-                root.add_child(Node(id=_safe_name(r["name"]), label=r["name"], smiles=r["smiles"]))
-
-        layout = MindMapLayout(node_width=200, node_height=150, padding=60)
-        img = layout.render(root)
-
-        mindmap_dir = self.output_dir / "mindmaps"
-        mindmap_dir.mkdir(parents=True, exist_ok=True)
-        path = str(mindmap_dir / "pipeline_mindmap.png")
-        cv2.imwrite(path, img)
-        return path
-
-    # ── step 5: scene generation ────────────────────────────────
-
-    def _generate_scene(self, prompt: str, style: str, width: int, height: int) -> str:
-        from src.scene_gen.generator import SceneGenerator
-
-        gen = SceneGenerator(provider="mock")
-        img = gen.generate(prompt=prompt, width=width, height=height)
-
-        scene_dir = self.output_dir / "scenes"
-        scene_dir.mkdir(parents=True, exist_ok=True)
-        path = str(scene_dir / "pipeline_scene.png")
-        img.save(path)
-        return path
-
-    # ── step 6: composite ───────────────────────────────────────
-
-    def _composite(self, scene_path: str, structures: list[dict], width: int, height: int) -> str:
-        from src.compositor.basic import load_image, resize_with_alpha
-        from src.compositor.lighting import match_and_blend
-
-        bg = load_image(scene_path)
-        if bg.shape[:2] != (height, width):
-            bg = cv2.resize(bg, (width, height), interpolation=cv2.INTER_LANCZOS4)
-
-        valid = [s for s in structures if s.get("struct_path") and Path(s["struct_path"]).exists()]
-        n = len(valid)
-
-        if n == 0:
-            final_dir = self.output_dir / "final"
-            final_dir.mkdir(parents=True, exist_ok=True)
-            fp = str(final_dir / "pipeline_final.png")
-            cv2.imwrite(fp, bg)
-            return fp
-
-        # Distribute structures evenly across the scene
-        margin = 120
-        spacing = (width - 2 * margin) // max(n, 1)
-        struct_w = min(220, spacing - 40)
-        struct_h = int(struct_w * 0.65)
-
-        for i, s in enumerate(valid):
-            overlay = load_image(s["struct_path"])
-            if overlay.shape[2] == 3:
-                overlay = cv2.cvtColor(overlay, cv2.COLOR_BGR2BGRA)
-
-            x = margin + i * spacing + (spacing - struct_w) // 2
-            y = height // 2 - struct_h // 2
-            overlay_rs = resize_with_alpha(overlay, struct_w, struct_h)
-            bg = match_and_blend(
-                bg, overlay_rs, (x, y),
-                color_match=True, texture_blend=0.06, shadow=True, feather=2,
-            )
-
-        final_dir = self.output_dir / "final"
-        final_dir.mkdir(parents=True, exist_ok=True)
-        fp = str(final_dir / "pipeline_final.png")
-        cv2.imwrite(fp, bg)
-        return fp
 
 
 def _safe_name(name: str) -> str:

@@ -27,7 +27,7 @@ def test_pipeline_full_flow():
         print("  ⚠ Skipped — RDKit not installed")
         return
 
-    pipe = ChemicalImagePipeline()
+    pipe = ChemicalImagePipeline(image_provider="mock")
     result = pipe.generate(
         "生成关于苯酚、苯甲酸和乙醇的思维导图",
         style="academic", width=1200, height=800,
@@ -55,7 +55,7 @@ def test_pipeline_agent_mode():
         print("  ⚠ Skipped — RDKit not installed")
         return
 
-    pipe = ChemicalImagePipeline()
+    pipe = ChemicalImagePipeline(image_provider="mock")
     result = pipe.generate(
         "Test: alcohols and ketones mindmap",
         use_agent=True,
@@ -70,7 +70,7 @@ def test_compound_extraction():
     """LLM compound extraction (falls back to defaults without API key)."""
     print("\n=== Test 3: Compound Extraction ===")
 
-    pipe = ChemicalImagePipeline()
+    pipe = ChemicalImagePipeline(image_provider="mock")
     result = pipe._extract_compounds("生成关于苯酚、苯甲酸及其酯化反应的思维导图")
 
     assert "title" in result
@@ -98,7 +98,7 @@ def test_resolve_compounds():
         print("  ⚠ Skipped — RDKit not installed")
         return
 
-    pipe = ChemicalImagePipeline()
+    pipe = ChemicalImagePipeline(image_provider="mock")
     results = pipe._resolve_compounds(["phenol", "benzoic acid"])
     assert len(results) == 2
     assert results[0]["status"] == "ok"
@@ -119,7 +119,7 @@ def test_structure_generation():
         print("  ⚠ Skipped — RDKit not installed")
         return
 
-    pipe = ChemicalImagePipeline()
+    pipe = ChemicalImagePipeline(image_provider="mock")
     resolved = [
         {"name": "phenol", "smiles": "c1ccc(cc1)O", "status": "ok"},
         {"name": "invalid", "smiles": "", "status": "error"},
@@ -136,7 +136,7 @@ def test_mindmap_building():
     """Build mindmap from parsed LLM tree."""
     print("\n=== Test 6: Mindmap Building ===")
 
-    pipe = ChemicalImagePipeline()
+    pipe = ChemicalImagePipeline(image_provider="mock")
     parsed = {
         "title": "Oxygen Compounds",
         "compounds": [
@@ -164,7 +164,7 @@ def test_scene_generation():
     """Scene generation (mock mode)."""
     print("\n=== Test 7: Scene Generation ===")
 
-    pipe = ChemicalImagePipeline()
+    pipe = ChemicalImagePipeline(image_provider="mock")
     path = pipe._generate_scene("test chemistry scene", "academic", 800, 600)
     assert Path(path).exists()
 
@@ -180,7 +180,7 @@ def test_composite():
         print("  ⚠ Skipped — RDKit not installed")
         return
 
-    pipe = ChemicalImagePipeline()
+    pipe = ChemicalImagePipeline(image_provider="mock")
     pipe.output_dir = settings.OUTPUT_DIR
 
     # Build prerequisites
@@ -219,7 +219,7 @@ def test_pipeline_result_metadata():
         print("  ⚠ Skipped — RDKit not installed")
         return
 
-    pipe = ChemicalImagePipeline()
+    pipe = ChemicalImagePipeline(image_provider="mock")
     result = pipe.generate("苯酚和乙醇", width=800, height=600)
 
     expected_keys = ["final_image", "steps", "compounds", "resolved", "mindmap_path", "scene_path"]

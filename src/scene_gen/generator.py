@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from src.config import settings
+from src.config import api_config, settings
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,10 @@ class SceneGenerator:
                 )
             return self._generate_sd_webui(
                 prompt, negative_prompt, width, height, guidance_scale, num_steps,
+            )
+        elif self.provider == "packyapi":
+            return self._generate_openai_image(
+                prompt, width, height,
             )
         elif self.provider == "mock":
             return self._generate_mock(width, height)
@@ -230,6 +234,77 @@ class SceneGenerator:
         data = resp.json()
         img_data = base64.b64decode(data["images"][0])
         return Image.open(BytesIO(img_data)).convert("RGB")
+
+    def _generate_openai_image(
+        self,
+        prompt: str,
+        width: int = 1024,
+        height: int = 768,
+    ) -> Image.Image:
+        """Call an OpenAI-compatible image generation API (packyapi, DALL-E, etc.).
+
+        Endpoint: POST /v1/images/generations
+        Response format: {"data": [{"b64_json": "..."}]} or {"data": [{"url": "..."}]}
+        """
+        import requests
+
+        key = api_config.figure_key
+        url = api_config.figure_url or self._cfg.get("image_api_url", "")
+        model = api_config.figure_model("image") or "gpt-image-2"
+
+        if not key:
+            logger.warning("No figure API key configured — falling back to mock")
+            return self._generate_mock(width, height)
+
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "size": f"{width}x{height}",
+            "quality": "high",
+            "output_format": "png",
+            "response_format": "b64_json",
+            "n": 1,
+        }
+
+        logger.info("OpenAI image gen → %s (model=%s)", url, model)
+
+        try:
+            resp = requests.post(
+                url,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {key}",
+                },
+                json=payload,
+                timeout=300,
+            )
+            resp.raise_for_status()
+        except requests.ConnectionError:
+            logger.warning("Image API not reachable at %s, falling back to mock", url)
+            return self._generate_mock(width, height)
+
+        data = resp.json()
+        if "data" in data and len(data["data"]) > 0:
+            entry = data["data"][0]
+            if "b64_json" in entry:
+                img_data = base64.b64decode(entry["b64_json"])
+                img = Image.open(BytesIO(img_data)).convert("RGB")
+            elif "url" in entry:
+                img_resp = requests.get(entry["url"], timeout=60)
+                img_resp.raise_for_status()
+                img = Image.open(BytesIO(img_resp.content)).convert("RGB")
+            else:
+                logger.warning("Unexpected image API response: %s", str(data)[:200])
+                return self._generate_mock(width, height)
+
+            # API may return a different size than requested; resize to match
+            if (img.width, img.height) != (width, height):
+                logger.info("Resizing API output %dx%d → %dx%d", img.width, img.height, width, height)
+                img = img.resize((width, height), Image.LANCZOS)
+            return img
+
+        logger.warning("Unexpected image API response: %s", str(data)[:200])
+        return self._generate_mock(width, height)
 
     def _generate_with_controlnet(
         self,

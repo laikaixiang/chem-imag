@@ -5,8 +5,8 @@ from pathlib import Path
 
 import gradio as gr
 
-from src.config import settings
-from src.agent.orchestrator import AgentOrchestrator
+from src.config import settings, api_config
+from src.pipeline import ChemicalImagePipeline
 from src.structure_gen.generator import StructureGenerator
 
 logger = logging.getLogger(__name__)
@@ -50,12 +50,14 @@ def _build_generation_tab():
                     value="academic", label="🎨 风格",
                 )
                 size = gr.Dropdown(
-                    choices=["1920×1080", "2560×1440"],
-                    value="1920×1080", label="📐 尺寸",
+                    choices=["1024×768", "1920×1080"],
+                    value="1024×768", label="📐 尺寸",
                 )
+                providers = api_config.available_figure_providers
+                default_provider = providers[0] if providers else "mock"
                 provider = gr.Dropdown(
-                    choices=["mock", "sd_webui"],
-                    value="mock", label="🤖 AI 后端",
+                    choices=providers,
+                    value=default_provider, label="🤖 AI 图像后端",
                 )
 
     with gr.Row():
@@ -63,16 +65,13 @@ def _build_generation_tab():
         status_text = gr.Markdown("✅ 就绪，等待输入...")
 
     with gr.Row():
-        preview_img = gr.Image(label="🖼️ 中间预览", type="filepath", height=350)
-        result_img = gr.Image(label="🎯 最终结果", type="filepath", height=350)
-
-    with gr.Row():
-        download_btn = gr.Button("📥 下载 PNG")
+        scene_img = gr.Image(label="🖼️ 场景图", type="filepath", height=400)
+        result_img = gr.Image(label="🎯 最终结果", type="filepath", height=400)
 
     generate_btn.click(
         fn=_on_generate,
         inputs=[input_text, style, size, provider],
-        outputs=[result_img, preview_img, status_text],
+        outputs=[result_img, scene_img, status_text],
     )
 
 
@@ -113,23 +112,28 @@ def _build_structure_tab():
 
 
 def _build_settings_tab():
+    talk_providers = api_config.available_talk_providers
+    figure_providers = api_config.available_figure_providers
+
     with gr.Group():
         gr.Markdown("### 🔗 API 连接")
-        api_provider = gr.Dropdown(
-            choices=["mock", "sd_webui", "openai", "replicate"],
-            value=settings.AI_IMAGE_PROVIDER, label="图像生成 API",
+        figure_provider = gr.Dropdown(
+            choices=figure_providers,
+            value=figure_providers[0] if figure_providers else "mock",
+            label="图像生成 API",
         )
-        api_url = gr.Textbox(value=settings.SD_WEBUI_URL, label="API URL")
-        llm_provider = gr.Dropdown(
-            choices=["claude", "openai", "default"],
-            value=settings.LLM_PROVIDER, label="LLM API",
+        api_url = gr.Textbox(value=api_config.figure_url, label="API URL")
+        talk_provider = gr.Dropdown(
+            choices=talk_providers,
+            value=talk_providers[0] if talk_providers else "",
+            label="LLM API（对话/提取）",
         )
         api_key = gr.Textbox(value="", label="API Key", type="password")
 
     with gr.Group():
         gr.Markdown("### 🖼️ 图像默认设置")
-        default_width = gr.Number(value=1920, label="默认宽度")
-        default_height = gr.Number(value=1080, label="默认高度")
+        default_width = gr.Number(value=1024, label="默认宽度")
+        default_height = gr.Number(value=768, label="默认高度")
         default_style = gr.Dropdown(
             choices=["academic", "modern", "minimal"],
             value="academic", label="默认风格",
@@ -144,7 +148,7 @@ def _build_settings_tab():
 
     save_btn.click(
         fn=_on_save_settings,
-        inputs=[api_provider, api_url, llm_provider, default_width, default_height, default_style, output_dir],
+        inputs=[figure_provider, api_url, talk_provider, default_width, default_height, default_style, output_dir],
         outputs=[save_msg],
     )
 
@@ -156,13 +160,26 @@ def _on_generate(input_text: str, style: str, size: str, provider: str):
         return None, None, "⚠️ 请输入描述内容"
 
     try:
-        orchestrator = AgentOrchestrator(llm_provider="default")
-        result = orchestrator.run(input_text)
+        w_str, h_str = size.split("×")
+        width, height = int(w_str), int(h_str)
+
+        pipe = ChemicalImagePipeline(image_provider=provider)
+        result = pipe.generate(
+            user_input=input_text,
+            style=style,
+            width=width,
+            height=height,
+        )
 
         final_path = result.get("final_image", "")
-        if final_path and Path(final_path).exists():
-            return final_path, final_path, f"✅ 生成完成！输出: {final_path}"
-        return None, None, "⚠️ 生成未产生最终图像，请查看控制台日志"
+        scene_path = result.get("scene_path", "")
+        scene_out = scene_path if scene_path and Path(scene_path).exists() else None
+        final_out = final_path if final_path and Path(final_path).exists() else None
+
+        if final_out:
+            compounds_str = ", ".join(result.get("compounds", []))
+            return final_out, scene_out, f"✅ 生成完成！化合物: {compounds_str}\n输出: {final_path}"
+        return None, scene_out, "⚠️ 生成未产生最终图像，请查看控制台日志"
     except Exception as e:
         logger.exception("generate failed")
         return None, None, f"❌ 错误: {e}"

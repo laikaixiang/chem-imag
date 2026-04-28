@@ -174,20 +174,27 @@ def _build_mindmap_impl(
 
 def _generate_scene_impl(
     prompt: str, output_path: str, style: str = "academic", mindmap_path: Optional[str] = None,
+    provider: str = "packyapi",
 ) -> dict:
     """Generate an AI scene, optionally enhanced from a mindmap skeleton."""
     import cv2
     from src.scene_gen.generator import SceneGenerator
+    from src.config import api_config
+
+    # Use the configured figure provider by default
+    if not provider or provider == "mock":
+        if api_config.figure_key:
+            provider = "packyapi"
 
     try:
         if mindmap_path:
             mindmap = cv2.imread(mindmap_path)
             if mindmap is None:
                 return {"path": "", "status": "error", "error": f"Cannot read: {mindmap_path}"}
-            gen = SceneGenerator(provider="mock")
+            gen = SceneGenerator(provider=provider)
             img = gen.enhance_mindmap(mindmap, style_prompt=style)
         else:
-            gen = SceneGenerator(provider="mock")
+            gen = SceneGenerator(provider=provider)
             img = gen.generate(prompt)
 
         img.save(output_path)
@@ -247,7 +254,7 @@ def _composite_final_impl(scene_path: str, structures_info: str, output_path: st
             overlay_crop = overlay[:roi_h, :roi_w]
             bg = match_and_blend(
                 bg, overlay_crop, (x, y),
-                color_match=True, texture_blend=0.08, shadow=True,
+                color_match=False, texture_blend=0, shadow=True, feather=0,
             )
 
         cv2.imwrite(output_path, bg)
@@ -333,6 +340,11 @@ def register_all_tools(registry: ToolRegistry):
                 "mindmap_path": {
                     "type": "string",
                     "description": "思维导图骨架图路径（提供时走 ControlNet 美化）",
+                },
+                "provider": {
+                    "type": "string",
+                    "enum": ["packyapi", "mock"],
+                    "description": "图像生成 provider（默认 packyapi）",
                 },
             },
             "required": ["prompt", "output_path"],

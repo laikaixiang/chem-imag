@@ -346,12 +346,11 @@ def test_default_plan():
     assert len(plan["steps"]) > 0
     print(f"  ✓ Default plan generated with {len(plan['steps'])} steps")
 
-    # Verify the pipeline order
+    # Verify the pipeline order (LLM provides SMILES directly → no resolve_compound needed)
     tool_names = [s["tool"] for s in plan["steps"]]
-    assert "resolve_compound" in tool_names
+    assert "generate_structure" in tool_names
     assert "composite_final" in tool_names
-    # resolve should come before composite
-    assert tool_names.index("resolve_compound") < tool_names.index("composite_final")
+    assert tool_names.index("generate_structure") < tool_names.index("composite_final")
     print("  ✓ Pipeline order is correct")
 
 

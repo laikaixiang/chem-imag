@@ -49,14 +49,39 @@ settings = Settings().ensure_dirs()
 # ── API config (api_config.json) ─────────────────────────────────
 
 class ApiConfig:
-    """Load api_config.json and expose per-provider keys/URLs/models.
+    """Load api_config.json with named talk and figure providers.
+
+    Structure:
+        {
+            "talk_provider": {
+                "siliconflow": { api_key, api_url, models: {talk, vl, experiment} }
+            },
+            "active_talk_provider": "siliconflow",
+            "figure_provider": {
+                "packyapi": { api_key, api_url, api_type, models: {image} }
+            },
+            "active_figure_provider": "packyapi"
+        }
 
     Usage:
         api = ApiConfig()
-        key = api.key                  # active provider's api_key
-        url = api.url                  # full endpoint with /chat/completions
-        base = api.base_url            # stripped of /chat/completions
-        model = api.model("talk")      # model name by purpose
+
+        # Talk (LLM) provider — compound extraction, prompt optimization
+        key   = api.talk_key           # active talk provider's api_key
+        url   = api.talk_url           # active talk provider's api_url
+        model = api.talk_model("talk") # active talk provider's model
+
+        # Figure (image gen) provider — scene generation
+        key   = api.figure_key
+        url   = api.figure_url
+        model = api.figure_model("image")
+
+        # Provider lists for UI dropdowns
+        api.available_talk_providers    → ["siliconflow"]
+        api.available_figure_providers  → ["packyapi", "mock"]
+
+        # Backward-compat shortcuts → active talk provider
+        api.key / api.url / api.model("talk")
     """
 
     def __init__(self, path: Path | None = None):
@@ -65,53 +90,105 @@ class ApiConfig:
             with open(path, encoding="utf-8") as f:
                 self._data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
-            self._data = {"default_provider": "", "providers": {}}
-        self._active = self._data.get("default_provider", "")
+            self._data = {}
 
-    # ── active provider helpers ─────────────────────────────────
+    # ── helpers ──────────────────────────────────────────────────
+
+    def _resolve_active(self, category: str) -> dict:
+        """Return the active provider dict for a category (talk / figure)."""
+        providers = self._data.get(category, {})
+        if not providers:
+            return {}
+        active_key = f"active_{category.rsplit('_', 1)[0]}_provider"
+        active_name = self._data.get(active_key, "")
+        if active_name and active_name in providers:
+            entry = providers[active_name]
+            if isinstance(entry, dict):
+                return entry
+        # No active set — pick the first named provider
+        for name, entry in providers.items():
+            if isinstance(entry, dict) and "api_key" in entry:
+                return entry
+        return {}
+
+    def _list_providers(self, category: str) -> list[str]:
+        """List all named providers under a category."""
+        providers = self._data.get(category, {})
+        return [k for k, v in providers.items() if isinstance(v, dict) and "api_key" in v]
+
+    # ── talk provider ────────────────────────────────────────────
 
     @property
-    def active_provider(self) -> str:
-        return self._active
+    def talk_key(self) -> str:
+        return self._resolve_active("talk_provider").get("api_key", "")
 
     @property
-    def provider(self) -> dict:
-        """Return the active provider's full config dict."""
-        return self._data.get("providers", {}).get(self._active, {})
+    def talk_url(self) -> str:
+        return self._resolve_active("talk_provider").get("api_url", "")
+
+    @property
+    def talk_base_url(self) -> str:
+        u = self.talk_url
+        return u.rsplit("/chat/completions", 1)[0] if "/chat/completions" in u else u
+
+    def talk_model(self, purpose: str = "talk") -> str:
+        return self._resolve_active("talk_provider").get("models", {}).get(purpose, "")
+
+    @property
+    def available_talk_providers(self) -> list[str]:
+        return self._list_providers("talk_provider")
+
+    # ── figure provider ──────────────────────────────────────────
+
+    @property
+    def figure_key(self) -> str:
+        return self._resolve_active("figure_provider").get("api_key", "")
+
+    @property
+    def figure_url(self) -> str:
+        return self._resolve_active("figure_provider").get("api_url", "")
+
+    def figure_model(self, purpose: str = "image") -> str:
+        return self._resolve_active("figure_provider").get("models", {}).get(purpose, "")
+
+    @property
+    def figure_provider_type(self) -> str:
+        return self._resolve_active("figure_provider").get("api_type", "mock")
+
+    @property
+    def available_figure_providers(self) -> list[str]:
+        """Return available figure providers. Always includes mock as fallback."""
+        providers = self._list_providers("figure_provider")
+        return providers + ["mock"] if providers else ["mock"]
+
+    # ── backward-compat (→ active talk provider) ─────────────────
 
     @property
     def key(self) -> str:
-        """API key for the active provider."""
-        return self.provider.get("api_key", "")
+        return self.talk_key
 
     @property
     def url(self) -> str:
-        """Full API endpoint (includes /chat/completions if applicable)."""
-        return self.provider.get("api_url", "")
+        return self.talk_url
 
     @property
     def base_url(self) -> str:
-        """Base URL — strips /chat/completions suffix for SDKs like PydanticAI."""
-        u = self.url
-        return u.rsplit("/chat/completions", 1)[0] if "/chat/completions" in u else u
+        return self.talk_base_url
 
     def model(self, purpose: str = "talk") -> str:
-        """Get model name by purpose (talk, vl, experiment, claude, haiku, gpt4o)."""
-        return self.provider.get("models", {}).get(purpose, "")
-
-    # ── cross-provider access ───────────────────────────────────
-
-    def provider_config(self, name: str) -> dict:
-        return self._data.get("providers", {}).get(name, {})
-
-    def switch_provider(self, name: str):
-        """Temporarily switch to a different provider."""
-        if name in self._data.get("providers", {}):
-            self._active = name
+        return self.talk_model(purpose)
 
     @property
     def has_key(self) -> bool:
-        return bool(self.key)
+        return bool(self.talk_key)
+
+    @property
+    def active_provider(self) -> str:
+        """Return "anthropic" or "openai_compatible" based on talk provider config."""
+        url = self.talk_url.lower()
+        if "anthropic" in url:
+            return "anthropic"
+        return "openai_compatible"
 
 
 api_config = ApiConfig()

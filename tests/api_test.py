@@ -18,7 +18,7 @@ from src.config import api_config
 
 
 class APITester:
-    """Validates API connectivity for configured providers."""
+    """Validates talk and figure API connectivity."""
 
     def __init__(self):
         self.results: list[tuple[str, bool, str]] = []
@@ -35,159 +35,100 @@ class APITester:
             print(f"      {msg}")
         self.results.append((name, ok, msg))
 
-    # ── tests ───────────────────────────────────────────────────
+    # ── talk provider tests ──────────────────────────────────────
 
-    def test_config_loaded(self):
-        self._header("Test 1: Config Loaded")
+    def test_talk_config(self):
+        self._header("Test 1: Talk Provider Config")
         checks = [
-            ("default_provider", api_config.active_provider),
-            ("api_key", api_config.key[:20] + "..." if len(api_config.key) > 20 else api_config.key),
-            ("api_url", api_config.url),
-            ("talk model", api_config.model("talk")),
-            ("vl model", api_config.model("vl")),
-            ("experiment model", api_config.model("experiment")),
+            ("talk_key", api_config.talk_key[:20] + "..." if len(api_config.talk_key) > 20 else api_config.talk_key),
+            ("talk_url", api_config.talk_url),
+            ("talk model (talk)", api_config.talk_model("talk")),
+            ("talk model (vl)", api_config.talk_model("vl")),
+            ("talk model (experiment)", api_config.talk_model("experiment")),
         ]
-        all_ok = True
         for name, val in checks:
-            ok = bool(val)
-            self._result(name, ok, val)
-            if not ok:
-                all_ok = False
-        return all_ok
+            self._result(name, bool(val), str(val))
 
-    def test_api_connection(self):
-        self._header("Test 2: API Connection")
-        if not api_config.key:
-            self._result("API connection", False, "No API key configured")
-            return False
-        if not api_config.url:
-            self._result("API connection", False, "No API URL configured")
-            return False
-
+    def test_talk_connection(self):
+        self._header("Test 2: Talk API Connection")
+        if not api_config.talk_key:
+            self._result("Talk connection", False, "No talk API key")
+            return
         try:
-            url = api_config.url
             resp = requests.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {api_config.key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": api_config.model("talk"),
-                    "messages": [{"role": "user", "content": "Hi"}],
-                    "max_tokens": 10,
-                },
+                api_config.talk_url,
+                headers={"Authorization": f"Bearer {api_config.talk_key}",
+                         "Content-Type": "application/json"},
+                json={"model": api_config.talk_model("talk"),
+                      "messages": [{"role": "user", "content": "Hi"}],
+                      "max_tokens": 10},
                 timeout=15,
             )
-            if resp.status_code == 200:
-                self._result("API connection", True, f"HTTP {resp.status_code}")
-                return True
-            else:
-                self._result("API connection", False,
-                             f"HTTP {resp.status_code}: {resp.text[:150]}")
-                return False
-        except requests.Timeout:
-            self._result("API connection", False, "Timeout (>15s)")
-            return False
-        except requests.ConnectionError as e:
-            self._result("API connection", False, str(e)[:120])
-            return False
+            ok = resp.status_code == 200
+            self._result("Talk connection", ok,
+                         f"HTTP {resp.status_code}" if ok else f"HTTP {resp.status_code}: {resp.text[:120]}")
+        except Exception as e:
+            self._result("Talk connection", False, str(e)[:120])
 
-    def test_talk_model(self):
-        self._header("Test 3: Talk Model (Chat)")
-        if not api_config.key:
-            self._result("Talk model", False, "No API key — skip")
-            return False
-
+    def test_talk_chat(self):
+        self._header("Test 3: Talk Chat")
+        if not api_config.talk_key:
+            self._result("Talk chat", False, "No talk API key")
+            return
         try:
             resp = requests.post(
-                api_config.url,
-                headers={
-                    "Authorization": f"Bearer {api_config.key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": api_config.model("talk"),
-                    "messages": [{"role": "user", "content": "Say hello in one sentence."}],
-                    "max_tokens": 50,
-                },
+                api_config.talk_url,
+                headers={"Authorization": f"Bearer {api_config.talk_key}",
+                         "Content-Type": "application/json"},
+                json={"model": api_config.talk_model("talk"),
+                      "messages": [{"role": "user", "content": "Say hello in one sentence."}],
+                      "max_tokens": 50},
                 timeout=30,
             )
             if resp.status_code == 200:
-                data = resp.json()
-                text = data["choices"][0]["message"]["content"]
-                self._result("Talk model", True, text[:120])
-                return True
+                text = resp.json()["choices"][0]["message"]["content"]
+                self._result("Talk chat", True, text[:120])
             else:
-                self._result("Talk model", False, f"HTTP {resp.status_code}: {resp.text[:150]}")
-                return False
+                self._result("Talk chat", False, f"HTTP {resp.status_code}: {resp.text[:120]}")
         except Exception as e:
-            self._result("Talk model", False, str(e)[:120])
-            return False
+            self._result("Talk chat", False, str(e)[:120])
 
-    def test_streaming(self):
-        self._header("Test 4: Streaming Response")
-        if not api_config.key:
-            self._result("Streaming", False, "No API key — skip")
-            return False
+    # ── figure provider tests ────────────────────────────────────
 
+    def test_figure_config(self):
+        self._header("Test 4: Figure Provider Config")
+        checks = [
+            ("figure_key", api_config.figure_key[:20] + "..." if len(api_config.figure_key) > 20 else "(empty)"),
+            ("figure_url", api_config.figure_url),
+            ("figure model (image)", api_config.figure_model("image")),
+        ]
+        for name, val in checks:
+            self._result(name, bool(val), str(val))
+
+    def test_figure_connection(self):
+        self._header("Test 5: Figure API Connection")
+        if not api_config.figure_key:
+            self._result("Figure connection", False, "No figure API key")
+            return
         try:
             resp = requests.post(
-                api_config.url,
-                headers={
-                    "Authorization": f"Bearer {api_config.key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": api_config.model("talk"),
-                    "messages": [{"role": "user", "content": "Count to 3."}],
-                    "stream": True,
-                    "max_tokens": 30,
-                },
-                stream=True,
-                timeout=30,
+                api_config.figure_url,
+                headers={"Authorization": f"Bearer {api_config.figure_key}",
+                         "Content-Type": "application/json"},
+                json={"model": api_config.figure_model("image"),
+                      "prompt": "test",
+                      "size": "256x256",
+                      "response_format": "b64_json",
+                      "n": 1},
+                timeout=120,
             )
-            if resp.status_code != 200:
-                self._result("Streaming", False, f"HTTP {resp.status_code}")
-                return False
-
-            chunks = 0
-            content = ""
-            for line in resp.iter_lines():
-                if not line:
-                    continue
-                s = line.decode("utf-8")
-                if s.startswith("data: "):
-                    s = s[6:]
-                if s == "[DONE]":
-                    break
-                try:
-                    delta = json.loads(s)["choices"][0].get("delta", {}).get("content", "")
-                    if delta:
-                        content += delta
-                        chunks += 1
-                except (json.JSONDecodeError, KeyError):
-                    pass
-
-            self._result("Streaming", chunks > 0,
-                         f"{chunks} chunks: {content[:100]}")
-            return chunks > 0
+            ok = resp.status_code == 200
+            self._result("Figure connection", ok,
+                         f"HTTP {resp.status_code}" if ok else f"HTTP {resp.status_code}: {resp.text[:120]}")
         except Exception as e:
-            self._result("Streaming", False, str(e)[:120])
-            return False
+            self._result("Figure connection", False, str(e)[:120])
 
-    def test_prompt_optimizer_e2e(self):
-        """End-to-end: optimize a real prompt via the Pipeline."""
-        self._header("Test 5: Prompt Optimizer E2E")
-        from src.prompt_optimizer import optimize_prompt
-
-        raw = "a cat sitting on a table"
-        opt = optimize_prompt(raw)
-
-        self._result("Optimizer E2E", isinstance(opt, str) and len(opt) > 0,
-                     f"'{raw[:60]}' -> '{opt[:120]}'")
-
-    # ── summary ─────────────────────────────────────────────────
+    # ── summary ──────────────────────────────────────────────────
 
     def print_summary(self):
         self._header("Summary")
@@ -205,24 +146,22 @@ class APITester:
 
         print("\n" + "=" * 60)
         if failed == 0:
-            print("  All tests passed — API config is valid.")
+            print("  All tests passed.")
         else:
             print("  Some tests failed — check api_config.json")
         print("=" * 60 + "\n")
         return failed == 0
 
     def run_all(self):
-        print(f"\nAPI Config Test — provider: {api_config.active_provider}")
-        print(f"URL: {api_config.url}")
-        print(f"Models: talk={api_config.model('talk')}, "
-              f"vl={api_config.model('vl')}, "
-              f"experiment={api_config.model('experiment')}")
+        print(f"\nAPI Config Test")
+        print(f"  talk_provider:   {api_config.talk_url}")
+        print(f"  figure_provider: {api_config.figure_url}")
 
-        self.test_config_loaded(); time.sleep(0.3)
-        self.test_api_connection(); time.sleep(0.3)
-        self.test_talk_model(); time.sleep(0.3)
-        self.test_streaming(); time.sleep(0.3)
-        self.test_prompt_optimizer_e2e()
+        self.test_talk_config(); time.sleep(0.3)
+        self.test_talk_connection(); time.sleep(0.3)
+        self.test_talk_chat(); time.sleep(0.3)
+        self.test_figure_config(); time.sleep(0.3)
+        self.test_figure_connection()
 
         return self.print_summary()
 

@@ -11,6 +11,7 @@ Supports:
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -283,56 +284,158 @@ class AgentOrchestrator:
 
     # ── default / mock execution ────────────────────────────────
 
-    def _default_plan(self, user_input: str) -> dict:
-        """Fallback plan when no LLM is available.
+    _EXTRACT_PROMPT = """Extract all organic chemistry compounds from the user's description below.
+Return ONLY a valid JSON object (no markdown fences, no extra text) with this exact structure:
 
-        Extracts compound names heuristically and runs the full pipeline.
+{{
+  "title": "short mindmap title (in English)",
+  "compounds": [
+    {{
+      "name": "IUPAC name in English (e.g. phenol, ethanol, benzoic acid)",
+      "smiles": "canonical SMILES string for this compound",
+      "parent": "parent compound English name or null for top-level"
+    }}
+  ]
+}}
+
+CRITICAL RULES:
+- ALL compound names MUST be in English (IUPAC). Never use Chinese names.
+- Provide accurate canonical SMILES for every compound.
+- If the user mentions a reaction, include both reactants and products.
+- If the user mentions a compound class (e.g. "alcohols"), expand to 2-3 representative examples.
+- Output ONLY the JSON object — no markdown fences, no extra text.
+
+User description:
+{user_input}
+
+JSON:"""
+
+    def _llm_extract(self, user_input: str) -> Optional[dict]:
+        """Call LLM to extract compounds into structured JSON.
+
+        Returns parsed dict with 'title' and 'compounds' keys, or None on failure.
+        Each compound has 'name', 'smiles', 'parent'.
+        Uses the configured talk provider (api_config.talk_*).
         """
-        import re
+        from src.config import api_config
 
-        # Heuristic compound detection (look for Chinese/English compound names)
-        compounds: list[str] = []
-        # Match Chinese compound names (common patterns)
-        chinese_matches = re.findall(r'[一-鿿]{1,6}(?:酸|醇|酮|醛|酯|胺|苯|酚|烯|炔|烷|醚|糖|苷|碱)', user_input)
-        compounds.extend(chinese_matches)
-        # Match English compound patterns
-        english_matches = re.findall(r'\b[A-Z][a-z]+(?:ic acid|ol|one|al|ate|ene|ane|yl|ine|ide)\b', user_input)
-        compounds.extend(english_matches)
+        prompt = self._EXTRACT_PROMPT.format(user_input=user_input)
+        api_key = self._api_key or api_config.talk_key
+        if not api_key:
+            logger.info("No API key — cannot extract via LLM")
+            return None
 
-        if not compounds:
-            compounds = ["phenol", "benzoic acid"]
+        # Always use the configured talk provider (not anthropic)
+        try:
+            return self._call_openai_text(prompt, api_key)
+        except Exception as e:
+            logger.warning("LLM extraction failed: %s", e)
+            return None
+
+    def _call_openai_text(self, prompt: str, api_key: str) -> Optional[dict]:
+        """Single-turn OpenAI-compatible text completion → parsed JSON."""
+        import requests
+        from src.config import api_config
+
+        url = api_config.talk_url or api_config.talk_base_url + "/v1/chat/completions"
+        model = api_config.talk_model("talk") or "gpt-4o"
+        resp = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 1024,
+                "temperature": 0.1,
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = data["choices"][0]["message"]["content"]
+        return _parse_json_response(text)
+
+    def _default_plan(self, user_input: str) -> dict:
+        """Build an execution plan using LLM compound extraction.
+
+        Calls LLM to parse the user input into structured JSON, then builds
+        tool-call steps from the extracted compounds. When LLM is unavailable,
+        falls back to a minimal hardcoded list.
+        """
+        extraction = self._llm_extract(user_input)
+
+        if extraction:
+            compounds = extraction.get("compounds", [])
+            title = extraction.get("title", "Organic Compounds")
+            logger.info("LLM extracted %d compounds: %s", len(compounds),
+                        [c.get("name") for c in compounds])
+        else:
+            logger.info("LLM extraction unavailable — using default compounds")
+            compounds = [
+                {"name": "phenol", "smiles": "c1ccccc1O", "parent": None},
+                {"name": "benzoic acid", "smiles": "O=C(O)c1ccccc1", "parent": None},
+            ]
+            title = "Organic Compounds"
+
+        n = min(len(compounds), 5)
+        compounds = compounds[:n]
 
         steps: list[dict] = []
-        for i, name in enumerate(compounds[:5]):
-            steps.append({"tool": "resolve_compound", "params": {"query": name}})
 
-        # After all resolves, generate structures (will be filled post-resolve)
-        for i, name in enumerate(compounds[:5]):
-            steps.append({
-                "tool": "generate_structure",
-                "params": {"smiles": f"<from resolve_compound #{i}>", "style": "ACS_1996"},
-            })
+        # Step 1: resolve + generate structures
+        # When LLM provides SMILES, use directly; otherwise resolve first.
+        resolve_idx = 0
+        for c in compounds:
+            name = c.get("name", str(c)) if isinstance(c, dict) else str(c)
+            smiles = c.get("smiles", "") if isinstance(c, dict) else ""
 
-        # Build mindmap (simplified tree)
+            if smiles:
+                # LLM provided SMILES — use directly (skip resolve)
+                steps.append({
+                    "tool": "generate_structure",
+                    "params": {"smiles": smiles, "style": "ACS_1996"},
+                })
+            else:
+                # Need to resolve name → SMILES via PubChem
+                steps.append({"tool": "resolve_compound", "params": {"query": name}})
+                steps.append({
+                    "tool": "generate_structure",
+                    "params": {"smiles": f"<from resolve_compound #{resolve_idx}>", "style": "ACS_1996"},
+                })
+                resolve_idx += 1
+
+        # Step 2: build mindmap tree
         tree = {
-            "label": "Organic Compounds",
-            "children": [{"label": c} for c in compounds[:5]],
+            "label": title,
+            "children": [
+                {
+                    "label": c.get("name", str(c)) if isinstance(c, dict) else str(c),
+                    "smiles": c.get("smiles", "") if isinstance(c, dict) else "",
+                }
+                for c in compounds
+            ],
         }
         steps.append({
             "tool": "build_mindmap",
             "params": {"tree_json": json.dumps(tree, ensure_ascii=False), "output_path": "outputs/mindmap.png"},
         })
 
+        # Step 3: generate scene
         steps.append({
             "tool": "generate_scene",
-            "params": {"prompt": "academic chemistry mindmap", "style": "academic", "output_path": "outputs/scene.png"},
+            "params": {"prompt": f"academic chemistry mindmap: {title}", "style": "academic", "output_path": "outputs/scene.png"},
         })
 
+        # Step 4: detect surfaces for placement
         steps.append({
             "tool": "detect_surface",
-            "params": {"scene_path": "outputs/scene.png", "structure_count": len(compounds[:5])},
+            "params": {"scene_path": "outputs/scene.png", "structure_count": n},
         })
 
+        # Step 5: composite final
         steps.append({
             "tool": "composite_final",
             "params": {
@@ -347,23 +450,67 @@ class AgentOrchestrator:
     def _execute_plan(self, plan: dict, output_dir: Path) -> dict:
         """Execute a static tool-call plan step-by-step."""
         results: dict[str, dict] = {}
+        resolved_smiles: list[str] = []
+
+        def _fix_path(key: str, value: str) -> str:
+            """Prevent path doubling: strip common output prefixes before joining."""
+            if value.startswith("/"):
+                return value
+            # Strip prefixes like "outputs/" or "outputs\\" to avoid doubling
+            for prefix in ("outputs/", "outputs\\"):
+                if value.startswith(prefix):
+                    value = value[len(prefix):]
+                    break
+            return str(output_dir / value)
 
         for step in plan.get("steps", []):
             tool_name = step["tool"]
             params = dict(step.get("params", {}))
 
-            # Fill in output paths from output_dir
+            # Fill in output paths, avoiding doubling
             for key in list(params.keys()):
-                if key.endswith("_path") and isinstance(params[key], str) and not params[key].startswith("/"):
-                    params[key] = str(output_dir / params[key])
+                if key.endswith("_path") and isinstance(params[key], str):
+                    params[key] = _fix_path(key, params[key])
+
+            # Resolve SMILES placeholders from prior resolve_compound results
+            if "smiles" in params and isinstance(params["smiles"], str):
+                m = re.match(r'<from resolve_compound #(\d+)>', params["smiles"])
+                if m:
+                    idx = int(m.group(1))
+                    if idx < len(resolved_smiles):
+                        params["smiles"] = resolved_smiles[idx]
+                    else:
+                        logger.warning("Cannot resolve placeholder %s — index %d out of range", params["smiles"], idx)
+                        results[tool_name] = {"status": "error", "error": f"Unresolved SMILES placeholder: {params['smiles']}"}
+                        continue
 
             try:
                 tool = self.registry.get(tool_name)
                 result = tool(**params)
                 results[tool_name] = result
                 logger.info("Executed %s → %s", tool_name, result.get("status", "?"))
+
+                # Collect SMILES from resolve_compound for later steps
+                if tool_name == "resolve_compound" and result.get("status") == "ok":
+                    resolved_smiles.append(result.get("smiles", ""))
             except Exception as exc:
                 results[tool_name] = {"status": "error", "error": str(exc)}
                 logger.error("Tool %s failed: %s", tool_name, exc)
 
         return results
+
+
+def _parse_json_response(text: str) -> Optional[dict]:
+    """Parse JSON from LLM output, handling markdown fences and stray text."""
+    # Strip ```json ... ``` fences
+    m = re.search(r'```(?:json)?\s*([\s\S]*?)```', text)
+    if m:
+        text = m.group(1)
+    # Find first { ... } block
+    m = re.search(r'\{[\s\S]*\}', text)
+    if m:
+        try:
+            return json.loads(m.group())
+        except json.JSONDecodeError:
+            pass
+    return None
